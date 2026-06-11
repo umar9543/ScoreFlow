@@ -20,16 +20,26 @@ const rateLimit = require('express-rate-limit');
 const app  = express();
 const PORT = process.env.PORT || 5000;
 
-// ── 1. Helmet — Security headers ─────────────────────────────────────────────
-app.use(helmet());
+// ── 1. CORS — must be FIRST, before Helmet ────────────────────────────────────
+// Explicitly allow x-api-key header so browser preflight (OPTIONS) passes.
+const corsOptions = {
+  origin:         '*',                           // allow all origins (Vercel, localhost, etc.)
+  methods:        ['GET', 'POST', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'x-api-key'], // ✅ must explicitly list x-api-key
+  credentials:    false,
+};
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));             // handle preflight OPTIONS for all routes
 
-// ── 2. CORS ───────────────────────────────────────────────────────────────────
-app.use(cors());
+// ── 2. Helmet — Security headers ─────────────────────────────────────────────
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' }, // allow cross-origin resource sharing
+}));
 
 // ── 3. Body parser ────────────────────────────────────────────────────────────
 app.use(express.json());
 
-// ── 4. Rate Limiting — 100 requests per 15 minutes per IP ────────────────────
+// ── 4. Rate Limiting — 100 requests per 15 minutes per IP ──────────────────
 const limiter = rateLimit({
   windowMs:         15 * 60 * 1000, // 15 minutes
   max:              100,             // max requests per window per IP
