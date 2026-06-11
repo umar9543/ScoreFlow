@@ -29,7 +29,7 @@ const corsOptions = {
   credentials:    false,
 };
 app.use(cors(corsOptions));
-app.options('*', cors(corsOptions));             // handle preflight OPTIONS for all routes
+app.options(/.*/, cors(corsOptions));            // handle preflight OPTIONS for all routes (Express v5 regex syntax)
 
 // ── 2. Helmet — Security headers ─────────────────────────────────────────────
 app.use(helmet({
