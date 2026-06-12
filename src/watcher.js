@@ -188,9 +188,72 @@ async function connectOneDrive(companyId, companyName, shareLink) {
 }
 
 /**
- * Connect via local / network file path.
- * (Local file source — file is read from disk but no copies are made.)
+ * Register a company for direct Excel upload (no cloud storage needed).
+ * ✅ ZDR: No disk writes — connection meta held in RAM only.
+ * ✅ GDPR: No third-party cloud — client pushes file directly to API.
  */
+function connectUpload(companyId, companyName) {
+  _cleanup(companyId);
+
+  const companyKey = generateCompanyKey();
+
+  store[companyId] = {
+    meta:       { companyId, companyName, sourceType: 'upload', connectedAt: new Date().toISOString(), lastUploaded: null },
+    data:       null,
+    error:      null,
+    status:     'waiting', // waiting for client to push their first file
+    lastHash:   null,
+    companyKey,
+    timer:      null,
+    watcher:    null,
+  };
+
+  console.log(`[${companyId}] ✅ Registered for direct upload. Awaiting Excel push...`);
+
+  // ✅ ZDR: No saveConnections() — no disk write
+  return companyKey;
+}
+
+/**
+ * Process a directly uploaded Excel Buffer (from multer memoryStorage).
+ * Called by POST /api/:companyId/upload route.
+ * ✅ ZDR: Buffer passed in RAM — never written to disk.
+ * ✅ GDPR: Raw buffer reference nulled after processing — GC reclaims it.
+ *
+ * @param {string} companyId
+ * @param {Buffer} buffer — Excel file buffer from multer (RAM only)
+ * @returns {{ success, totalSuppliers, avgScore, lastUpdated } | { success, error }}
+ */
+function processUpload(companyId, buffer) {
+  const entry = store[companyId];
+  if (!entry) return { success: false, error: `${companyId} not registered.` };
+
+  try {
+    entry.status = 'processing';
+    entry.meta.lastUploaded = new Date().toISOString();
+
+    // ✅ ZDR: processFile accepts Buffer directly — no disk write
+    processFile(companyId, buffer);
+
+    if (entry.status === 'error') {
+      return { success: false, error: entry.error };
+    }
+
+    return {
+      success:        true,
+      totalSuppliers: entry.data?.summary?.totalSuppliers || 0,
+      avgScore:       entry.data?.summary?.avgScore       || 0,
+      lastUpdated:    entry.data?.lastUpdated             || new Date().toISOString(),
+    };
+
+  } catch (err) {
+    entry.status = 'error';
+    entry.error  = err.message;
+    return { success: false, error: err.message };
+  }
+}
+
+
 function connectLocal(companyId, companyName, filePath) {
   _cleanup(companyId);
 
@@ -251,4 +314,4 @@ function disconnect(companyId) {
   console.log(`[${companyId}] 🔌 Disconnected. All data purged from memory.`);
 }
 
-module.exports = { connectOneDrive, connectLocal, getData, getCompanyKey, listAll, disconnect };
+module.exports = { connectOneDrive, connectLocal, connectUpload, processUpload, getData, getCompanyKey, listAll, disconnect };
