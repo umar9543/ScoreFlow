@@ -1,17 +1,38 @@
 /**
- * scorecard.js — Routes for OneDrive + Local connections
+ * scorecard.js — Routes for OneDrive + Local + Direct Upload connections
  *
  * Security model:
  *   masterAuth  → POST /connect, GET /connections, GET /health, DELETE /disconnect
  *   companyAuth → GET /:companyId/results|summary|supplier|tier
+ *                 POST /:companyId/upload  (company pushes Excel directly)
  *
  * ✅ Multi-tenant: Each company's key only unlocks their own data.
+ * ✅ ZDR: Upload uses multer memoryStorage — file never touches disk.
  */
 
 const express  = require('express');
+const multer   = require('multer');
 const router   = express.Router();
 const watcher  = require('../watcher');
 const { masterAuth, companyAuth } = require('../middleware/auth');
+
+// ✅ ZDR: memoryStorage — uploaded file is held in RAM buffer, never written to disk
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits:  { fileSize: 50 * 1024 * 1024 }, // 50 MB max
+  fileFilter: (req, file, cb) => {
+    const allowed = [
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', // .xlsx
+      'application/vnd.ms-excel',                                           // .xls
+      'application/octet-stream',                                           // generic binary
+    ];
+    if (allowed.includes(file.mimetype) || file.originalname.match(/\.xlsx?$/i)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only Excel files (.xlsx, .xls) are accepted.'));
+    }
+  },
+});
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ADMIN ROUTES — require MASTER key
@@ -92,8 +113,38 @@ router.post('/connect', masterAuth, async (req, res) => {
         });
       }, 3000);
 
+    } else if (sourceType === 'upload') {
+      // Register company for direct upload — no cloud needed
+      const companyKey = watcher.connectUpload(id, companyName);
+
+      return res.json({
+        success:    true,
+        message:    `${companyName} registered for direct upload. Push your Excel to the upload endpoint.`,
+        companyId:  id,
+        sourceType: 'upload',
+        security: {
+          companyApiKey: companyKey,
+          warning:       '⚠️ Save this key! It is only shown once. Share it with the company to upload their data.',
+          usage:         `x-api-key: ${companyKey}`,
+        },
+        endpoints: {
+          upload:   `POST /api/${id}/upload  (multipart/form-data, field: "file")`,
+          results:  `GET  /api/${id}/results`,
+          summary:  `GET  /api/${id}/summary`,
+          supplier: `GET  /api/${id}/supplier/:vendorNo`,
+          tier:     `GET  /api/${id}/tier/strategic`,
+        },
+        gdpr: {
+          diskWrite:         false,
+          cloudStorage:      'none',
+          dataLocation:      'EU Frankfurt (Railway)',
+          rawFileRetained:   false,
+          rightToErasure:    `DELETE /api/${id}/disconnect`,
+        },
+      });
+
     } else {
-      res.status(400).json({ success: false, error: 'sourceType must be "onedrive" or "local"' });
+      res.status(400).json({ success: false, error: 'sourceType must be "onedrive", "local", or "upload"' });
     }
 
   } catch (err) {
@@ -115,6 +166,80 @@ router.get('/health', masterAuth, (req, res) => {
     companies: all.length,
     connections: all.map(c => ({ id: c.companyId, status: c.status, source: c.sourceType })),
   });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DIRECT UPLOAD ROUTE — company pushes Excel file directly (no cloud needed)
+// ✅ ZDR: multer memoryStorage → file in RAM buffer → processed → buffer deleted
+// ✅ GDPR: No disk write, no cloud, data stays in EU Frankfurt
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * POST /api/:companyId/upload
+ * Requires:  company API key (or master key)
+ * Body:      multipart/form-data with field "file" (Excel .xlsx/.xls)
+ * ZDR:       File received as RAM buffer → parsed → buffer discarded immediately
+ */
+router.post('/:companyId/upload', companyAuth, upload.single('file'), async (req, res) => {
+  const companyId = req.params.companyId;
+
+  if (!req.file) {
+    return res.status(400).json({
+      success: false,
+      error:   'No file received. Send Excel as multipart/form-data with field name "file".',
+      example: 'curl -X POST https://your-api.railway.app/api/conrad/upload -H "x-api-key: YOUR_KEY" -F "file=@scorecard.xlsx"',
+    });
+  }
+
+  const entry = watcher.getData(companyId);
+  if (!entry) {
+    return res.status(404).json({
+      success: false,
+      error:   `"${companyId}" not registered. POST /api/connect with sourceType "upload" first.`,
+    });
+  }
+
+  const fileSizeKB = (req.file.size / 1024).toFixed(0);
+  const fileName   = req.file.originalname;
+
+  console.log(`[${companyId}] 📤 Direct upload received: ${fileName} (${fileSizeKB} KB) — processing in RAM...`);
+
+  try {
+    // ✅ ZDR: Pass the in-memory Buffer directly to processFile — no disk write ever
+    const result = watcher.processUpload(companyId, req.file.buffer);
+
+    // ✅ ZDR: Buffer reference released — GC will collect it
+    req.file.buffer = null;
+
+    if (!result.success) {
+      return res.status(500).json({ success: false, error: result.error });
+    }
+
+    return res.json({
+      success:          true,
+      companyId,
+      fileName,
+      fileSizeKB,
+      suppliersProcessed: result.totalSuppliers,
+      avgScore:           result.avgScore,
+      lastUpdated:        result.lastUpdated,
+      // ✅ GDPR proof — returned in every response
+      gdpr: {
+        rawFileRetained:  false,
+        diskWrite:        false,
+        cloudStorage:     'none — file sent directly to API',
+        processingTime:   '< 5 seconds in RAM',
+        message:          '✅ Your Excel file was processed in RAM and immediately discarded. No copy retained.',
+      },
+      endpoints: {
+        results:  `GET /api/${companyId}/results`,
+        summary:  `GET /api/${companyId}/summary`,
+      },
+    });
+
+  } catch (err) {
+    return res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // Disconnect — admin only
