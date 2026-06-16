@@ -48,12 +48,12 @@ function processFile(companyId, filePathOrBuffer) {
 
   try {
     const lookups   = parseWorkbook(filePathOrBuffer);
-    const vendors   = lookups.results;
-    if (!vendors.length) throw new Error('No suppliers found in Excel.');
+    const vendors   = lookups.results;   // [ { vendorNo, vendorName, team } ]
+    if (!vendors || !vendors.length) throw new Error('No suppliers found in Results sheet of Excel.');
 
     const suppliers = vendors.map((v) => {
       const { grades, dataWarnings } = gradeSupplier(v.vendorNo, lookups);
-      const { pillars, totalScore, tier } = calcScores(grades);
+      const { pillars, totalScore, tier } = calcScores(lookups.scoresMap[v.vendorNo] || {});
       return { vendorNo: v.vendorNo, vendorName: v.vendorName, team: v.team, tier, totalScore, pillars, grades, dataWarnings };
     });
 
