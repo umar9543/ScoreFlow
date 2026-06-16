@@ -1,70 +1,72 @@
 /**
  * grader.js
  * Assigns A/B/C grades to each KPI for a given supplier.
- * Uses pre-built lookup maps from parser.js.
+ * Reads pre-calculated grades directly from the Results sheet via parser.js.
+ *
+ * The Results sheet is the single source of truth — all 24 KPIs (including
+ * IVI, Return Rate, On-time Rate, OTIF, Vessel, Inspection Booking,
+ * Order Confirmation, Communication, Sustainability) are already graded there.
  */
 
-const MISSING = 'A'; // Default grade when source data not available
+const VALID_GRADES = new Set(['A', 'B', 'C']);
 
 /**
- * Grade all 23 KPIs for a single supplier.
+ * Grade all 24 KPIs for a single supplier.
+ *
  * @param {string} vendorNo
- * @param {object} lookups - from parser.parseWorkbook()
- * @returns {object} grades + dataWarnings
+ * @param {object} lookups - from parser.parseWorkbook() — must contain { gradesMap }
+ * @returns {{ grades: object, dataWarnings: string[] }}
  */
 function gradeSupplier(vendorNo, lookups) {
-  const warnings = []; // Track which KPIs used default
+  const warnings  = [];
+  const rawGrades = lookups.gradesMap?.[vendorNo] || {};
 
-  function get(map, key, field = null) {
-    const entry = map[key];
-    if (!entry) return null;
-    if (field) return entry[field] || null;
-    return entry;
-  }
-
-  function grade(val, kpiName) {
-    if (val && ['A', 'B', 'C'].includes(String(val).toUpperCase())) {
-      return String(val).toUpperCase();
-    }
-    warnings.push(kpiName);
-    return MISSING;
+  /**
+   * Validate a raw cell value as A/B/C.
+   * If missing or invalid → warn + return null (scorer will treat as no data).
+   */
+  function grade(rawVal, kpiLabel) {
+    const v = rawVal != null ? String(rawVal).toUpperCase().trim() : null;
+    if (v && VALID_GRADES.has(v)) return v;
+    warnings.push(kpiLabel);
+    return null; // scorer handles null as missing (treated as 0 pts or excluded)
   }
 
   // ── Assortment & Margin (5 KPIs) ──────────────────────────────────────────
-  const ceiBuying  = grade(get(lookups.ceiBuying, vendorNo),           'CEI Buying');
-  const ceeRetail  = grade(get(lookups.ceeRetail, vendorNo),           'CEE Retail');
-  const ceiProfit  = grade(get(lookups.ceiProfit, vendorNo),           'CEI Profit');
-  const ceeCm1     = grade(get(lookups.ceeCm1,    vendorNo),           'CEE CM1');
-  const newItem    = grade(get(lookups.newItem,   vendorNo),           'New Item%');
+  const ceiBuying  = grade(rawGrades.ceiBuying,  'CEI Buying');
+  const ceeRetail  = grade(rawGrades.ceeRetail,  'CEE Retail');
+  const ceiProfit  = grade(rawGrades.ceiProfit,  'CEI Profit');
+  const ceeCm1     = grade(rawGrades.ceeCm1,     'CEE CM1');
+  const newItem    = grade(rawGrades.newItem,    'New Item%');
 
   // ── Quality Assurance (5 KPIs) ─────────────────────────────────────────────
-  const passRate   = grade(get(lookups.inspection, vendorNo, 'passRate'),   'Inspection Pass Rate');
-  const defectRate = grade(get(lookups.inspection, vendorNo, 'defectRate'), 'Defect Rate');
-  const reInspect  = grade(get(lookups.inspection, vendorNo, 'reInspect'),  'Re-inspection');
-  const ivi        = grade(null,                                             'IVI');         // no source sheet
-  const returnRate = grade(null,                                             'Return Rate'); // no source sheet
+  const passRate   = grade(rawGrades.passRate,   'Pass Rate');
+  const defectRate = grade(rawGrades.defectRate, 'Defect Rate');
+  const reInspect  = grade(rawGrades.reInspect,  'Re-inspection');
+  const ivi        = grade(rawGrades.ivi,        'IVI');
+  const returnRate = grade(rawGrades.returnRate, 'Return Rate');
 
   // ── Delivery & Fulfillment (3 KPIs) ────────────────────────────────────────
-  const leadTime   = grade(get(lookups.leadtime, vendorNo),  'Lead Time');
-  const onTime     = grade(null,                             'On-time Rate'); // no source sheet
-  const otif       = grade(null,                             'OTIF');         // no source sheet
+  const leadTime   = grade(rawGrades.leadTime,   'Lead Time');
+  const onTime     = grade(rawGrades.onTime,     'On-time Rate');
+  const otif       = grade(rawGrades.otif,       'OTIF');
 
-  // ── Operation (4 KPIs) — no source sheet, default A ───────────────────────
-  const vessel     = grade(null, 'Vessel Booking');
-  const inspBook   = grade(null, 'Inspection Booking');
-  const orderConf  = grade(null, 'Order Confirmation');
-  const comms      = grade(null, 'Communication');
+  // ── Operation (4 KPIs) ─────────────────────────────────────────────────────
+  const vessel     = grade(rawGrades.vessel,     'Vessel Booking');
+  const inspBook   = grade(rawGrades.inspBook,   'Inspection Booking');
+  const orderConf  = grade(rawGrades.orderConf,  'Order Confirmation');
+  const comms      = grade(rawGrades.comms,      'Communication');
 
   // ── Terms & Conditions (6 KPIs) ────────────────────────────────────────────
-  const payment    = grade(get(lookups.service, vendorNo, 'payment'),   'Payment Terms');
-  const fob        = grade(get(lookups.service, vendorNo, 'fob'),       'FOB Terms');
-  const remission  = grade(get(lookups.service, vendorNo, 'remission'), 'Remission %');
-  const bonus      = grade(get(lookups.service, vendorNo, 'bonus'),     'Agreed Bonus');
-  const mov        = grade(get(lookups.service, vendorNo, 'mov'),       'MOV Required');
-  const autoBonus  = grade(get(lookups.service, vendorNo, 'autoBonus'), 'Auto Bonus');
+  const payment    = grade(rawGrades.payment,    'Payment Terms');
+  const fob        = grade(rawGrades.fob,        'FOB Terms');
+  const remission  = grade(rawGrades.remission,  'Remission %');
+  const bonus      = grade(rawGrades.bonus,      'Agreed Bonus');
+  const mov        = grade(rawGrades.mov,        'MOV Required');
+  const autoBonus  = grade(rawGrades.autoBonus,  'Auto Bonus');
 
-  // ── Sustainability (1 KPI) — no source sheet ──────────────────────────────
-  const sustainability = grade(null, 'Sustainability');
+  // ── Sustainability (1 KPI) ────────────────────────────────────────────────
+  const sustainability = grade(rawGrades.sustainability, 'Sustainability');
 
   return {
     grades: {
