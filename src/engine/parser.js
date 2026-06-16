@@ -5,17 +5,63 @@
  * ✅ ZDR: Accepts either a file path (for local file watcher) OR an
  *         in-memory Buffer (for remote OneDrive/Google Drive downloads).
  *         No temporary files are written to disk.
+ *
+ * Results sheet column layout (Row 1 = group headers, Row 2 = KPI headers, Row 3+ = data):
+ *   [0]  Vendor No.
+ *   [1]  Vendor Name
+ *   [2]  Team
+ *   ── Assortment & Margin ──
+ *   [3]  2025 CEI Buying          grade
+ *   [4]  2025 CEE Retail          grade
+ *   [5]  2025 CEI Margin/Profit   grade
+ *   [6]  2025 CEE CM1             grade
+ *   [7]  2025 New item%           grade
+ *   ── Quality Assurance ──
+ *   [8]  Inspection Pass Rate     grade
+ *   [9]  Inspection Defect Rate   grade
+ *   [10] Number of Re-inspection  grade
+ *   [11] IVI                      grade
+ *   [12] Return Rate              grade
+ *   ── Delivery & Fulfillment ──
+ *   [13] Production Lead time     grade
+ *   [14] On-time rate             grade
+ *   [15] OTIF                     grade
+ *   ── Operation ──
+ *   [16] Vessel booking           grade
+ *   [17] Inspection booking       grade
+ *   [18] Order confirmation       grade
+ *   [19] Communication            grade
+ *   ── Terms & Conditions ──
+ *   [20] Payment Terms            grade
+ *   [21] FOB terms                grade
+ *   [22] Service remission %      grade
+ *   [23] Agreed bonus %           grade
+ *   [24] MOV required?            grade
+ *   [25] Automated Bonus          grade
+ *   ── Sustainability ──
+ *   [26] Sustainability (AA)      grade
+ *   ── Pre-computed Pillar Scores ──  (used directly — single source of truth)
+ *   [29] Assortment & Margin score
+ *   [30] Quality Assurance score
+ *   [31] Delivery & Fulfillment score
+ *   [32] Operation score
+ *   [33] Terms & Conditions score
+ *   [34] Sustainability score
+ *   [35] Total Marks
  */
 
 const XLSX = require('xlsx');
 
 /**
- * Parse the workbook and build lookup maps keyed by vendor number (string).
+ * Parse the workbook and build lookup maps keyed by vendor number.
  *
  * @param {string|Buffer} fileOrBuffer
  *   - If string  → read from local disk path (used by local file watcher)
  *   - If Buffer  → parse directly from memory (ZDR: used for OneDrive/GDrive)
- * @returns {object} lookups - { ceiBuying, ceeRetail, ceiProfit, ceeCm1, newItem, inspection, leadtime, service, results }
+ * @returns {object} { gradesMap, scoresMap, results }
+ *   gradesMap : { [vendorNo]: { ceiBuying, ceeRetail, ... } }  — all KPI letter grades
+ *   scoresMap : { [vendorNo]: { assortment, quality, delivery, operation, terms, sustainability, total } }
+ *   results   : [ { vendorNo, vendorName, team } ] — ordered vendor list
  */
 function parseWorkbook(fileOrBuffer) {
   let wb;
@@ -28,138 +74,102 @@ function parseWorkbook(fileOrBuffer) {
     wb = XLSX.readFile(fileOrBuffer, { cellFormula: false, cellHTML: false });
   }
 
-  const lookups = {
-    ceiBuying:  buildLookup(wb, 'CEI Buying',  0, 5),   // col A=key, col F(5)=rank
-    ceeRetail:  buildRankLookup(wb, 'CEE Retail'),       // cols L-O, col O=rank
-    ceiProfit:  buildLookup(wb, 'CEI Profit',  0, 5),   // col A=key, col F(5)=rank
-    ceeCm1:     buildRankLookup(wb, 'CEE CM1'),          // cols L-O, col O=rank
-    newItem:    buildLookup(wb, 'New Item%',   0, 6),   // col A=key, col G(6)=rank
-    inspection: buildInspection(wb),                     // cols A,F,G,H
-    leadtime:   buildLookup(wb, 'Leadtime',    0, 4),   // col A=key, col E(4)=rank
-    service:    buildService(wb),                        // cols A, L-Q (ranks)
-    results:    buildResultsList(wb),                    // Results sheet vendor list
-  };
-
-  return lookups;
+  return buildFromResults(wb);
 }
 
 /**
- * Generic lookup: key=col[keyIdx], value=col[valIdx]
+ * Build all data from the Results sheet.
+ *
+ * Row 1 (index 0) = group headers  (Assortment & Margin, Quality Assurance…)
+ * Row 2 (index 1) = KPI headers    (Vendor No., CEI Buying…)
+ * Row 3+ (index 2+) = supplier data
+ *
+ * Grade columns [3]–[26]: A/B/C letter grades per KPI.
+ * Score columns [29]–[35]: pre-computed pillar scores from Excel formulas.
+ *   We read these directly — avoids replicating the Excel formula logic.
  */
-function buildLookup(wb, sheetName, keyIdx, valIdx) {
-  const ws = wb.Sheets[sheetName];
-  if (!ws) return {};
-
-  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
-  const map = {};
-
-  for (let i = 1; i < rows.length; i++) {
-    const row = rows[i];
-    if (!row || row[keyIdx] == null) continue;
-    const key = String(row[keyIdx]).trim();
-    const val = row[valIdx] != null ? String(row[valIdx]).trim() : null;
-    if (key && val) map[key] = val;
-  }
-
-  return map;
-}
-
-/**
- * CEE Retail & CEE CM1: rank data is in columns L-O (index 11-14)
- * Col L = vendor no, Col O = rank
- */
-function buildRankLookup(wb, sheetName) {
-  const ws = wb.Sheets[sheetName];
-  if (!ws) return {};
-
-  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
-  const map = {};
-
-  for (let i = 1; i < rows.length; i++) {
-    const row = rows[i];
-    if (!row || row[11] == null) continue; // col L = index 11
-    const key = String(row[11]).trim();
-    const val = row[14] != null ? String(row[14]).trim() : null; // col O = index 14
-    if (key && val) map[key] = val;
-  }
-
-  return map;
-}
-
-/**
- * Inspection: cols A=vendorNo, F=passRateRank, G=defectRateRank, H=reInspectRank
- */
-function buildInspection(wb) {
-  const ws = wb.Sheets['Inspection'];
-  if (!ws) return {};
-
-  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
-  const map = {};
-
-  for (let i = 1; i < rows.length; i++) {
-    const row = rows[i];
-    if (!row || row[0] == null) continue;
-    const key = String(row[0]).trim();
-    map[key] = {
-      passRate:   row[5] != null ? String(row[5]).trim() : null, // col F
-      defectRate: row[6] != null ? String(row[6]).trim() : null, // col G
-      reInspect:  row[7] != null ? String(row[7]).trim() : null, // col H
-    };
-  }
-
-  return map;
-}
-
-/**
- * Service: col A=vendorNo, cols L-Q (idx 11-16) = grade ranks
- * L=Payment, M=FOB, N=Remission, O=Bonus, P=MOV, Q=AutoBonus
- */
-function buildService(wb) {
-  const ws = wb.Sheets['Service'];
-  if (!ws) return {};
-
-  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
-  const map = {};
-
-  for (let i = 1; i < rows.length; i++) {
-    const row = rows[i];
-    if (!row || row[0] == null) continue;
-    const key = String(row[0]).trim();
-    map[key] = {
-      payment:    row[11] != null ? String(row[11]).trim() : null, // col L
-      fob:        row[12] != null ? String(row[12]).trim() : null, // col M
-      remission:  row[13] != null ? String(row[13]).trim() : null, // col N
-      bonus:      row[14] != null ? String(row[14]).trim() : null, // col O
-      mov:        row[15] != null ? String(row[15]).trim() : null, // col P
-      autoBonus:  row[16] != null ? String(row[16]).trim() : null, // col Q
-    };
-  }
-
-  return map;
-}
-
-/**
- * Results sheet: read vendor list (col A=vendorNo, B=name, C=team)
- * Row 1 = title, Row 2 = headers, Row 3+ = data
- */
-function buildResultsList(wb) {
+function buildFromResults(wb) {
   const ws = wb.Sheets['Results'];
-  if (!ws) return [];
+  if (!ws) return { gradesMap: {}, scoresMap: {}, results: [] };
 
   const rows = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null });
-  const vendors = [];
 
-  for (let i = 2; i < rows.length; i++) { // start row 3 (index 2)
+  const gradesMap = {};
+  const scoresMap = {};
+  const results   = [];
+
+  // Row index 2 onwards = data (row 1 = group labels, row 2 = KPI headers)
+  for (let i = 2; i < rows.length; i++) {
     const row = rows[i];
-    if (!row || row[0] == null) break;
-    vendors.push({
-      vendorNo:   String(row[0]).trim(),
+    if (!row || row[0] == null) break; // empty row = end of data
+
+    const vendorNo = String(row[0]).trim();
+    if (!vendorNo) continue;
+
+    // Helper: safely extract a grade cell (A/B/C or null)
+    const g = (col) => (row[col] != null ? String(row[col]).trim() : null);
+
+    // Helper: safely extract a numeric score cell
+    const n = (col, dp = 2) => {
+      const v = row[col];
+      if (v == null || isNaN(Number(v))) return 0;
+      return parseFloat(Number(v).toFixed(dp));
+    };
+
+    // ── Grade columns (3–26) ────────────────────────────────────────────────
+    gradesMap[vendorNo] = {
+      // Assortment & Margin
+      ceiBuying:      g(3),
+      ceeRetail:      g(4),
+      ceiProfit:      g(5),
+      ceeCm1:         g(6),
+      newItem:        g(7),
+      // Quality Assurance
+      passRate:       g(8),
+      defectRate:     g(9),
+      reInspect:      g(10),
+      ivi:            g(11),
+      returnRate:     g(12),
+      // Delivery & Fulfillment
+      leadTime:       g(13),
+      onTime:         g(14),
+      otif:           g(15),
+      // Operation
+      vessel:         g(16),
+      inspBook:       g(17),
+      orderConf:      g(18),
+      comms:          g(19),
+      // Terms & Conditions
+      payment:        g(20),
+      fob:            g(21),
+      remission:      g(22),
+      bonus:          g(23),
+      mov:            g(24),
+      autoBonus:      g(25),
+      // Sustainability
+      sustainability: g(26),
+    };
+
+    // ── Pre-computed pillar scores from Excel (cols 29–35) ──────────────────
+    // These are read directly from the spreadsheet to ensure 100% formula parity.
+    const assortment    = n(29, 2);
+    const quality       = n(30, 2);
+    const delivery      = n(31, 2);
+    const operation     = n(32, 2);
+    const terms         = n(33, 2);
+    const sustainability = n(34, 2);
+    const total         = n(35, 2);
+
+    scoresMap[vendorNo] = { assortment, quality, delivery, operation, terms, sustainability, total };
+
+    results.push({
+      vendorNo,
       vendorName: row[1] ? String(row[1]).trim() : '',
       team:       row[2] ? String(row[2]).trim() : '',
     });
   }
 
-  return vendors;
+  return { gradesMap, scoresMap, results };
 }
 
 module.exports = { parseWorkbook };
