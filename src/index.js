@@ -56,7 +56,7 @@ app.use(limiter);
 app.get('/', (req, res) => {
   res.json({
     name:    'Supplier Scorecard API — Zero Data Retention + Secured',
-    version: '4.1.0',
+    version: '5.0.0',
     status:  'running',
     security: {
       masterKey:   '✅ Required for admin routes (POST /api/connect, GET /api/connections)',
@@ -70,6 +70,13 @@ app.get('/', (req, res) => {
       header:   'x-api-key: YOUR_API_KEY',
       connect:  'POST /api/connect',
       results:  'GET  /api/:companyId/results',
+      turnover: 'GET  /api/:companyId/turnover  — chart data sorted by CEI Buying 2025 (EUR)',
+    },
+    schema: {
+      pillars: '4 pillars: Turnover & Margin (30%), Assortment & Innovation (30%), Quality (25%), Fulfillment (15%)',
+      grades:  'Numeric KPIs 0-3 mapped to A/B/C/D',
+      businessClass: 'A/B/C/D from Excel Results sheet',
+      performance:   '1.top / 2.prefered / 3.under / 4.critical from Excel',
     },
   });
 });
