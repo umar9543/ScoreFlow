@@ -88,6 +88,7 @@ router.post('/connect', masterAuth, async (req, res) => {
           summary:  `GET /api/${id}/summary`,
           supplier: `GET /api/${id}/supplier/:vendorNo`,
           tier:     `GET /api/${id}/tier/strategic`,
+          turnover: `GET /api/${id}/turnover`,
         },
       });
 
@@ -286,6 +287,53 @@ router.get('/:companyId/tier/:tierName', companyAuth, (req, res) => {
   if (!entry?.data) return res.status(404).json({ success: false, error: 'Not connected or loading.' });
   const suppliers = entry.data.suppliers.filter(s => s.tier === tier);
   res.json({ success: true, tier, count: suppliers.length, suppliers });
+});
+
+/**
+ * GET /api/:companyId/turnover
+ * Returns turnover chart data for all suppliers sorted by CEI Buying 2025 (EUR) value.
+ * Includes per-class distribution (A/B/C/D) for the chart.
+ *
+ * Optional query params:
+ *   ?limit=N     — return only top N suppliers (default: all)
+ *   ?class=A     — filter by business class (A/B/C/D)
+ *   ?minValue=N  — filter suppliers with CEI Buying 2025 >= N
+ */
+router.get('/:companyId/turnover', companyAuth, (req, res) => {
+  const entry = watcher.getData(req.params.companyId);
+  if (!entry?.data) return res.status(entry ? 202 : 404).json({ success: false, status: entry?.status || 'not_found', message: entry ? 'Still loading...' : 'Not connected.' });
+
+  let chart = entry.data.turnoverChart || [];
+
+  // Optional filter by business class
+  if (req.query.class) {
+    const cls = req.query.class.toUpperCase();
+    chart = chart.filter(t => t.businessClass === cls);
+  }
+
+  // Optional filter by minimum value
+  if (req.query.minValue) {
+    const min = parseFloat(req.query.minValue);
+    if (!isNaN(min)) chart = chart.filter(t => (t.actuals?.ceiBuying2025 || 0) >= min);
+  }
+
+  // Optional limit
+  if (req.query.limit) {
+    const lim = parseInt(req.query.limit, 10);
+    if (!isNaN(lim) && lim > 0) chart = chart.slice(0, lim);
+  }
+
+  res.json({
+    success:               true,
+    companyId:             req.params.companyId,
+    lastUpdated:           entry.data.lastUpdated,
+    totalCeiBuying2025:    entry.data.summary.totalCeiBuying2025,
+    totalSuppliers:        (entry.data.turnoverChart || []).length,
+    suppliersWithValue:    (entry.data.turnoverChart || []).filter(t => t.actuals?.ceiBuying2025 > 0).length,
+    classDistribution:     entry.data.turnoverClassDistribution,
+    turnoverTotals:        entry.data.turnoverTotals,
+    chart,
+  });
 });
 
 module.exports = router;
