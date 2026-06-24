@@ -47,14 +47,29 @@ function processFile(companyId, filePathOrBuffer) {
   entry.status = 'processing';
 
   try {
-    const lookups   = parseWorkbook(filePathOrBuffer);
-    const vendors   = lookups.results;   // [ { vendorNo, vendorName, team } ]
+    const lookups  = parseWorkbook(filePathOrBuffer);
+    const vendors  = lookups.results;   // [ { vendorNo, vendorName, team } ]
     if (!vendors || !vendors.length) throw new Error('No suppliers found in Results sheet of Excel.');
 
     const suppliers = vendors.map((v) => {
-      const { grades, dataWarnings } = gradeSupplier(v.vendorNo, lookups);
-      const { pillars, totalScore, tier } = calcScores(lookups.scoresMap[v.vendorNo] || {});
-      return { vendorNo: v.vendorNo, vendorName: v.vendorName, team: v.team, tier, totalScore, pillars, grades, dataWarnings };
+      const { grades, dataWarnings }                              = gradeSupplier(v.vendorNo, lookups);
+      const { pillars, totalScore, tier,
+              businessClass, performance, overallClass,
+              actuals }                                          = calcScores(lookups.scoresMap[v.vendorNo] || {});
+      return {
+        vendorNo:      v.vendorNo,
+        vendorName:    v.vendorName,
+        team:          v.team,
+        tier,
+        totalScore,
+        pillars,
+        grades,
+        dataWarnings,
+        businessClass,
+        performance,
+        overallClass,
+        actuals,
+      };
     });
 
     suppliers.sort((a, b) => b.totalScore - a.totalScore);
@@ -69,6 +84,7 @@ function processFile(companyId, filePathOrBuffer) {
       avgScore:           parseFloat((suppliers.reduce((s, x) => s + x.totalScore, 0) / total).toFixed(2)),
       topScore:           suppliers[0]?.totalScore || 0,
       bottomScore:        suppliers[total - 1]?.totalScore || 0,
+      totalCeiBuying2025: parseFloat(suppliers.reduce((s, x) => s + (x.actuals?.ceiBuying2025 || 0), 0).toFixed(2)),
     };
 
     const tierDistribution = [
@@ -78,23 +94,93 @@ function processFile(companyId, filePathOrBuffer) {
       { tier: 'At Risk',            count: summary.atRisk,             pct: +((summary.atRisk             / total * 100).toFixed(1)) },
     ];
 
+    // ── Turnover chart data: all suppliers with actuals, sorted by CEI Buying 2025 desc ──
+    const turnoverChart = Object.values(lookups.turnoverMap || {})
+      .filter(t => t.actuals?.ceiBuying2025 > 0)
+      .sort((a, b) => b.actuals.ceiBuying2025 - a.actuals.ceiBuying2025)
+      .map(t => ({
+        vendorNo:      t.vendorNo,
+        vendorName:    t.vendorName,
+        team:          t.team,
+        turnoverScore: t.turnoverScore,
+        businessClass: t.businessClass,
+        performance:   t.performance,
+        grades:        t.grades,
+        kpis:          t.kpis,
+        actuals:       t.actuals,
+      }));
+
+    // Business class distribution for turnover chart
+    const classCount = { A: 0, B: 0, C: 0, D: 0 };
+    const classValue = { A: 0, B: 0, C: 0, D: 0 };
+    turnoverChart.forEach(t => {
+      const cls = t.businessClass || 'D';
+      if (classCount[cls] !== undefined) {
+        classCount[cls]++;
+        classValue[cls] = parseFloat((classValue[cls] + (t.actuals?.ceiBuying2025 || 0)).toFixed(2));
+      }
+    });
+    const turnoverClassDistribution = ['A','B','C','D'].map(cls => ({
+      class:         cls,
+      count:         classCount[cls],
+      totalValue:    classValue[cls],
+      totalValueM:   parseFloat((classValue[cls] / 1_000_000).toFixed(3)), // in millions
+      pct:           total > 0 ? +((classCount[cls] / total * 100).toFixed(1)) : 0,
+    }));
+
+    // ── Grand totals across ALL suppliers for each turnover KPI ────────────────
+    const turnoverTotals = {
+      // Sum of all suppliers' actual EUR/HKD values
+      totalCeiBuying2024: parseFloat(turnoverChart.reduce((s, t) => s + (t.actuals?.ceiBuying2024 || 0), 0).toFixed(2)),
+      totalCeiBuying2025: parseFloat(turnoverChart.reduce((s, t) => s + (t.actuals?.ceiBuying2025 || 0), 0).toFixed(2)),
+      totalCeeRetail2025: parseFloat(turnoverChart.reduce((s, t) => s + (t.actuals?.ceeRetail2025 || 0), 0).toFixed(2)),
+      totalCeiProfit2024: parseFloat(turnoverChart.reduce((s, t) => s + (t.actuals?.ceiProfit2024 || 0), 0).toFixed(2)),
+      totalCeiProfit2025: parseFloat(turnoverChart.reduce((s, t) => s + (t.actuals?.ceiProfit2025 || 0), 0).toFixed(2)),
+      totalCeeCm12025:    parseFloat(turnoverChart.reduce((s, t) => s + (t.actuals?.ceeCm12025    || 0), 0).toFixed(2)),
+      // In Millions (for chart labels)
+      totalCeiBuying2024M: parseFloat((turnoverChart.reduce((s, t) => s + (t.actuals?.ceiBuying2024 || 0), 0) / 1_000_000).toFixed(3)),
+      totalCeiBuying2025M: parseFloat((turnoverChart.reduce((s, t) => s + (t.actuals?.ceiBuying2025 || 0), 0) / 1_000_000).toFixed(3)),
+      totalCeeRetail2025M: parseFloat((turnoverChart.reduce((s, t) => s + (t.actuals?.ceeRetail2025 || 0), 0) / 1_000_000).toFixed(3)),
+      totalCeiProfit2024M: parseFloat((turnoverChart.reduce((s, t) => s + (t.actuals?.ceiProfit2024 || 0), 0) / 1_000_000).toFixed(3)),
+      totalCeiProfit2025M: parseFloat((turnoverChart.reduce((s, t) => s + (t.actuals?.ceiProfit2025 || 0), 0) / 1_000_000).toFixed(3)),
+      totalCeeCm12025M:    parseFloat((turnoverChart.reduce((s, t) => s + (t.actuals?.ceeCm12025    || 0), 0) / 1_000_000).toFixed(3)),
+      // YoY growth CEI Buying
+      ceiBuyingGrowthPct: (() => {
+        const prev = turnoverChart.reduce((s, t) => s + (t.actuals?.ceiBuying2024 || 0), 0);
+        const curr = turnoverChart.reduce((s, t) => s + (t.actuals?.ceiBuying2025 || 0), 0);
+        if (!prev) return 0;
+        return parseFloat(((curr - prev) / prev * 100).toFixed(1));
+      })(),
+      // Performance breakdown across all suppliers
+      performanceDistribution: {
+        top:      turnoverChart.filter(t => t.performance === '1.top').length,
+        preferred:turnoverChart.filter(t => t.performance === '2.prefered').length,
+        under:    turnoverChart.filter(t => t.performance === '3.under').length,
+        critical: turnoverChart.filter(t => t.performance === '4.critical').length,
+        noData:   turnoverChart.filter(t => !t.performance).length,
+      },
+    };
+
     // ✅ ZDR: Only the computed scorecard JSON is kept — not the raw Excel buffer
     entry.data = {
       companyId,
-      companyName:      entry.meta.companyName,
-      sourceType:       entry.meta.sourceType,
-      lastUpdated:      new Date().toISOString(),
-      nextRefreshIn:    entry.meta.sourceType === 'onedrive' ? `${process.env.POLL_MINUTES || 5} minutes` : 'on file change',
+      companyName:               entry.meta.companyName,
+      sourceType:                entry.meta.sourceType,
+      lastUpdated:               new Date().toISOString(),
+      nextRefreshIn:             entry.meta.sourceType === 'onedrive' ? `${process.env.POLL_MINUTES || 5} minutes` : 'on file change',
       summary,
       tierDistribution,
-      topSuppliers:    suppliers.slice(0, 10),
-      bottomSuppliers: suppliers.slice(-5).reverse(),
+      topSuppliers:              suppliers.slice(0, 10),
+      bottomSuppliers:           suppliers.slice(-5).reverse(),
       suppliers,
+      turnoverChart,
+      turnoverClassDistribution,
+      turnoverTotals,
     };
 
     entry.error  = null;
     entry.status = 'live';
-    console.log(`[${companyId}] ✅ ${total} suppliers processed. Avg: ${summary.avgScore}`);
+    console.log(`[${companyId}] ✅ ${total} suppliers processed. Avg: ${summary.avgScore}. Turnover chart: ${turnoverChart.length} suppliers.`);
 
   } catch (err) {
     entry.error  = err.message;
